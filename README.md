@@ -27,13 +27,15 @@ If the remote server returns **200 OK** the request is proxied; any other status
 | timeout | No | 5000 | HTTP timeout (ms) for the auth server call |
 
 ## How It Works
+```
 Client                   Kong (auth-plugin)              Auth Server          Upstream
   |--- GET /api --------->|                                   |                   |
   |                        |--- GET / (Authorization: X) ---->|                   |
   |                        |<-- 200 OK {"token":"jwt..."} ----|                   |
   |                        |--- GET /api (X-Auth-Token: jwt) ------------------>|
   |<-- 200 OK ------------|<---------------------------------------------------|
-  
+```
+
 1. Client sends a request to Kong with a credential header (e.g. Authorization). 
 2. The plugin reads the header (or uses the configured header_value). 
 3. It calls the remote auth server, forwarding the credential. 
@@ -62,6 +64,7 @@ Pongo run
 ```
 
 ## Project Structure
+```
 kong-plugin-auth-plugin/
 ├── kong/plugins/auth-plugin/
 │   ├── handler.lua          # Access-phase logic
@@ -70,5 +73,6 @@ kong-plugin-auth-plugin/
 │   └── 01-integration_spec.lua   # Integration tests
 ├── kong-plugin-auth-plugin-0.1.0-1.rockspec
 └── README.md
+```
 
 ## License
