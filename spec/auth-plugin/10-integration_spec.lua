@@ -188,6 +188,42 @@ for _, strategy in helpers.all_strategies() do
           },
 
           -- ============================================================
+          -- AUTH endpoint that fails once, then succeeds.
+          -- Used to verify that non-success auth responses are not cached.
+          -- ============================================================
+          ["/auth-flaky"] = {
+            access = [[
+              local cjson = require "cjson.safe"
+              local headers = ngx.req.get_headers()
+              local state = ngx.shared.auth_state
+              ngx.header["Content-Type"] = "application/json"
+
+              local cred = headers["authorization"]
+              if cred ~= "Bearer flaky-once" then
+                ngx.status = 403
+                ngx.say(cjson.encode({ message = "forbidden" }))
+                return ngx.exit(403)
+              end
+
+              local attempts, err = state:incr(cred, 1)
+              if not attempts then
+                assert(state:set(cred, 1), err)
+                attempts = 1
+              end
+
+              if attempts == 1 then
+                ngx.status = 403
+                ngx.say(cjson.encode({ message = "try again" }))
+                return ngx.exit(403)
+              end
+
+              ngx.status = 200
+              ngx.say(cjson.encode({ message = "ok after retry" }))
+              return ngx.exit(200)
+            ]],
+          },
+
+          -- ============================================================
           -- ECHO endpoint (upstream)
           -- ============================================================
           ["/echo"] = {
@@ -202,6 +238,9 @@ for _, strategy in helpers.all_strategies() do
             ]],
           },
         }, {
+          dicts = {
+            auth_state = "1m",
+          },
           log_opts = {
             req = true,
             resp = true,
@@ -333,6 +372,25 @@ for _, strategy in helpers.all_strategies() do
           },
         })
 
+        local dead_cache_route = bp.routes:insert({
+          hosts      = { "dead-cache.test" },
+          paths      = { "/echo" },
+          strip_path = false,
+          service    = service,
+        })
+        bp.plugins:insert({
+          name   = PLUGIN_NAME,
+          route  = { id = dead_cache_route.id },
+          config = {
+            auth_url        = "http://127.0.0.1:1/auth",
+            credential_name = "Authorization",
+            cache_ttl       = 60,
+            connect_timeout = 500,
+            read_timeout    = 500,
+            send_timeout    = 500,
+          },
+        })
+
         -- 15. success_codes rejection (default codes = {200}, 204 should fail)
         add_case("successcodes-reject.test")
 
@@ -371,6 +429,23 @@ for _, strategy in helpers.all_strategies() do
             credential_name   = "Authorization",
             cache_ttl         = 60,
             upstream_headers  = { "X-Auth-Nonce" },
+          }),
+        })
+
+        local flaky_auth_url = "http://127.0.0.1:" .. mock_port .. "/auth-flaky"
+        local flaky_route = bp.routes:insert({
+          hosts      = { "cache-flaky.test" },
+          paths      = { "/echo" },
+          strip_path = false,
+          service    = service,
+        })
+        bp.plugins:insert({
+          name   = PLUGIN_NAME,
+          route  = { id = flaky_route.id },
+          config = merge({
+            auth_url        = flaky_auth_url,
+            credential_name = "Authorization",
+            cache_ttl       = 60,
           }),
         })
 
@@ -691,6 +766,19 @@ for _, strategy in helpers.all_strategies() do
         assert.equals("Auth service unavailable", body.message)
       end)
 
+      it("cache_ttl: unreachable auth server still returns 502", function()
+        local res = proxy_client:send({
+          method  = "GET",
+          path    = "/echo",
+          headers = {
+            Host          = "dead-cache.test",
+            Authorization = "Bearer anything",
+          },
+        })
+        local body = decode_json(res, 502)
+        assert.equals("Auth service unavailable", body.message)
+      end)
+
       it("success_codes rejection: 204 rejected when not in success_codes", function()
         -- Default success_codes = {200}. Auth server returns 204 for this cred.
         -- 204 is 2xx but not in success_codes, so handler returns 403 (not 4xx range).
@@ -781,6 +869,28 @@ for _, strategy in helpers.all_strategies() do
 
         -- If cache works, both nonces are identical (came from same cached response)
         assert.equals(nonce1, nonce2)
+      end)
+
+      it("cache_ttl: failed auth responses are not cached", function()
+        local res1 = proxy_client:send({
+          method  = "GET",
+          path    = "/echo",
+          headers = {
+            Host          = "cache-flaky.test",
+            Authorization = "Bearer flaky-once",
+          },
+        })
+        assert.response(res1).has.status(403)
+
+        local res2 = proxy_client:send({
+          method  = "GET",
+          path    = "/echo",
+          headers = {
+            Host          = "cache-flaky.test",
+            Authorization = "Bearer flaky-once",
+          },
+        })
+        assert.response(res2).has.status(200)
       end)
 
       it("cache isolation: GET and POST routes don't share cache", function()

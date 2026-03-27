@@ -203,29 +203,24 @@ function AuthPluginHandler:access(conf)
       if call_err then
         return nil, call_err
       end
-      -- Cache 2xx and 4xx results.
-      -- Do NOT cache 5xx, so transient auth-server failures don't stick.
-      if (s >= 200 and s < 300) or (s >= 400 and s < 500) then
+      -- Cache only successful auth responses.
+      if is_success(conf, s) then
         return { body = b, headers = h, status = s }
       end
 
-      -- 5xx or other unexpected statuses are not cached
-      return nil, "auth_service_error:" .. s
+      return nil, "auth_status:" .. s
     end)
 
     if cached then
       body         = cached.body
       resp_headers = cached.headers
       status       = cached.status
-    elseif cache_err and cache_err:find("^auth_failed:") then
-      -- The auth call succeeded but returned a non-success status;
-      -- extract the status code and fall through to the reject logic.
-      -- TODO: configurable
-      status = tonumber(cache_err:match("^auth_failed:(%d+)"))
+    elseif cache_err and cache_err:find("auth_status:%d%d%d") then
+      status = tonumber(cache_err:match("auth_status:(%d%d%d)"))
     else
       -- cache_err means the HTTP call itself failed (connection error)
       kong.log.err("auth server unreachable: ", cache_err)
-      return kong.response.exit(503, { message = "Auth service unavailable" })
+      return kong.response.exit(502, { message = "Auth service unavailable" })
     end
   else
     local call_err
