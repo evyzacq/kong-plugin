@@ -39,6 +39,19 @@
 7. scaling might be parted of kong.cache(to be confirmed)
 
 ```
+20260327:
+I initially planned to add more product-level features. 
+However, with more I familiar with Kong’s plugin architecture, 
+I realize it already provides robust mechanisms for handling different functional layers. 
+To avoid logic overlap and potential performance degradation, I’ve decided to keep this plugin focused strictly on Authentication.
+
+My focus is shifting to the following optimizations:
+- header transformation: Ensuring flexibility across the client, Auth Server, and Upstream
+- caching: md5-based keys are preferred and exploring Lua-specific caching techniques.
+- connection: utilizing connection pooling to eliminate the overhead of repeated handshakes.
+- scenario coverage: prioritizing header-based auth, direct forwarding scenario like machine accounts.
+
+
 
 ### Testing
 #### Test Coverage
@@ -398,13 +411,36 @@ Stopping after installing dependencies for kong-plugin-auth-plugin 0.1.0-1
 10 successes / 0 failures / 0 errors / 0 pending : 26.320914 seconds
 dzhou2@DavidDesktop:~/github/kong-plugin$
 ```
+or in shell
+``` bash
+[Kong-3.9.1:kong-plugin:/kong]$ busted /kong-plugin/spec/auth-plugin/10-integration_spec.lua
+●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+50 successes / 0 failures / 0 errors / 0 pending : 6.465606 seconds
+[Kong-3.9.1:kong-plugin:/kong]$
+```
+20260327：
+``` bash
+[Kong-3.9.1:kong-plugin:/kong]$ busted /kong-plugin/spec/auth-plugin/10-integration_spec.lua
+●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
+50 successes / 0 failures / 0 errors / 0 pending : 6.404591 seconds
+```
+errors in log print are expected: 
+``` bash
+dzhou2@DavidDesktop:~/github/kong-plugin$ ../kong-pongo/pongo.sh tail|grep kong|grep err
+tail: './servroot/logs/error.log' has become inaccessible: No such file or directory
+tail: directory containing watched file was removed
+tail: inotify cannot be used, reverting to polling
+tail: './servroot/logs/error.log' has appeared;  following new file
+tail: './servroot/logs/error.log' has been replaced;  following new file
+2026/03/27 04:26:19 [error] 250101#0: *667 [kong] handler.lua:234 [auth-plugin] auth server unreachable: connection refused, client: 127.0.0.1, server: kong, request: "GET /echo HTTP/1.1", host: "dead.test", request_id: "786b19109b81451d8532192ac635420a"
+2026/03/27 04:26:19 [error] 250101#0: *672 [kong] handler.lua:242 [auth-plugin] auth server returned 500, client: 127.0.0.1, server: kong, request: "GET /echo HTTP/1.1", host: "auth-500.test", request_id: "1ee51f3abb867d460fdb430a7cc76966"
 
-
+```
 
 
 ### Debugging
 
-1. pongo run failed with lack of "rockspec"
+#### 1. pongo run failed with lack of "rockspec" 20260326
 ``` bash
 dzhou2@DavidDesktop:~/github/kong-plugin$ ../kong-pongo/pongo.sh run
 [pongo-INFO] auto-starting the test environment, use the 'pongo down' action to stop it
@@ -419,7 +455,7 @@ Error: /kong-plugin/kong-plugin-auth-plugin-0.1.0-1.rockspec: Mandatory field pa
 ```
 create `kong-plugin-auth-plugin-0.1.0-1.rockspec` and `kong reload`
 
-2. httpmock server not working ！**issue**
+#### 2. httpmock server not working ！**issue**  20260326
 2.1 http mock failed
 
 ``` lua
@@ -483,3 +519,64 @@ Body:
 2.4 worked after rewrite, but the main idles were same
 NOTE: `kauth` and `pongo expose` 
 ** pending diving**
+
+#### 3. cache test case failed  20260327
+``` bash
+[Kong-3.9.1:kong-plugin:/kong]$ busted /kong-plugin/spec/auth-plugin/10-integration_spec.lua
+●●●●●●●●●●●●◼●●●●●●●●●●◼●●●●●●●●●●●●●◼●●●●●●●●●●◼●
+46 successes / 4 failures / 0 errors / 0 pending : 8.719265 seconds
+
+Failure → /kong-plugin/spec/auth-plugin/10-integration_spec.lua @ 572
+auth-plugin integration [#postgres] cache_ttl: repeated requests succeed (cache does not break flow)
+/kong-plugin/spec/auth-plugin/10-integration_spec.lua:605: Invalid response status code.
+Status expected:
+(number) 403
+Status received:
+(number) 502
+Body:
+(string) '{"message":"Auth service unavailable"}'
+403
+
+Failure → /kong-plugin/spec/auth-plugin/10-integration_spec.lua @ 786
+auth-plugin integration [#postgres] cache isolation: GET and POST routes don't share cache
+/kong-plugin/spec/auth-plugin/10-integration_spec.lua:811: Invalid response status code.
+Status expected:
+(number) 403
+Status received:
+(number) 502
+Body:
+(string) '{"message":"Auth service unavailable"}'
+403
+```
+
+log was added for debugging, cache_err check was removed  as well:
+``` lua
+    local cached, cache_err = kong.cache:get(key, { ttl = conf.cache_ttl }, function()
+      local b, h, s, call_err = authenticate(conf, credential)
+      kong.log.err("TempLog: ", call_err, b, h, s)
+```
+got this
+``` bash
+2026/03/27 03:06:30 [error] 236429#0: *671 [kong] handler.lua:203 [auth-plugin] TempLog: nil{"message":"Method-sensitive POST forbidden"}
+2026/03/27 03:06:30 [error] 236429#0: *671 [kong] init.lua:406 [auth-plugin] /kong-plugin/kong/plugins/auth-plugin/handler.lua:235: attempt to compare nil with number, client: 127.0.0.1, server: kong, request: "POST /echo HTTP/1.1", host: "cache-post.test", request_id: "e1542957b238583fec0f3e401982a30e"
+```
+non-200 responses are dropped, resulting in false 502 errors. 
+code change:
+``` lua
+    local key = cache_key(conf, credential)
+    local cached, cache_err = kong.cache:get(key, { ttl = conf.cache_ttl }, function()
+      local b, h, s, call_err = authenticate(conf, credential)
+      kong.log.err("dzhou: ", call_err, b, h, s)
+      if call_err then
+        return nil, call_err
+      end
+      -- Cache 2xx and 4xx results.
+      -- Do NOT cache 5xx, so transient auth-server failures don't stick.
+      if (s >= 200 and s < 300) or (s >= 400 and s < 500) then
+        return { body = b, headers = h, status = s }
+      end
+
+      -- 5xx or other unexpected statuses are not cached
+      return nil, "auth_service_error:" .. s
+    end)
+```
